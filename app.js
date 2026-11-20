@@ -273,9 +273,42 @@ function buildTip(items) {
     "출발 1시간 전에 다시 확인해 보세요.";
 }
 
+/** 출발지·도착지 시나리오를 같은 번호끼리 이어 붙인다.
+ *  외출 시간대의 처음(출발)과 끝(집 도착)은 출발지, 그 사이는 도착지 값을 쓴다. */
+function routeMembers(orig, dest, idx) {
+  if (!dest || dest === orig || idx.length <= 2) return orig;
+  const destHours = new Set(idx.slice(1, -1));
+  const byId = new Map(dest.map((m) => [m.id, m]));
+  const keys = ["precip", "rain", "snow", "feels", "temp", "wind"];
+  return orig.filter((m) => byId.has(m.id)).map((m) => {
+    const d = byId.get(m.id);
+    const out = { id: m.id, model: m.model };
+    for (const k of keys) {
+      const a = m[k] || [], b = d[k] || [];
+      out[k] = a.map((v, i) => (destHours.has(i) ? (b[i] ?? null) : v));
+    }
+    return out;
+  });
+}
+
+/** 구간 하나의 요약: 시나리오별 최저 체감온도의 가운데값, 비·눈 만난 시나리오 비율 */
+function segmentSummary(members, idx) {
+  const mins = [], n0 = members.length;
+  let wet = 0;
+  for (const m of members) {
+    const f = idx.map((i) => val(m.feels, i)).filter(isNum);
+    if (!f.length) continue;
+    mins.push(Math.min(...f));
+    if (idx.some((i) => (val(m.precip, i) ?? 0) >= RULES.rainMm)) wet++;
+  }
+  if (!mins.length) return null;
+  mins.sort((a, b) => a - b);
+  return { feels: mins[Math.floor(mins.length / 2)], wet: wet / (mins.length || n0) };
+}
+
 // Node에서 테스트할 수 있도록 내보내기
 if (typeof module !== "undefined") {
-  module.exports = { RULES, COAT_LEVELS, parseMembers, windowIndices, judge, buildItems, buildHeadline, buildTip, airGrade, confidenceOf };
+  module.exports = { RULES, COAT_LEVELS, parseMembers, windowIndices, judge, buildItems, buildHeadline, buildTip, airGrade, confidenceOf, routeMembers, segmentSummary };
 }
 
 // ───────────────────────── 화면 ─────────────────────────
@@ -294,7 +327,7 @@ if (typeof document !== "undefined") {
     const dow = new Date(today + "T12:00:00").getDay();
     const toSat = (6 - dow + 7) % 7;
     for (const off of [toSat, toSat + 1]) {
-      if (off < 2 || off > 6) continue; // 오늘·내일과 겹치거나 예보 범위 밖이면 생략
+      if (off < 2 || off > 6) continue;
       const d = addDays(today, off);
       const dd = new Date(d + "T12:00:00");
       opts.push({ label: `${DAY[dd.getDay()]} ${dd.getMonth() + 1}/${dd.getDate()}`, date: d });
@@ -302,26 +335,34 @@ if (typeof document !== "undefined") {
     return opts;
   }
 
+  const cityNames = CITIES.map((c) => c[1]);
   const state = {
-    city: store.get("city", "서울"),
+    from: store.get("from", store.get("city", "서울")),
+    to: store.get("to", store.get("city", "서울")),
     dateIdx: 0,
     start: store.get("start", 8),
     end: store.get("end", 18),
     dotTab: "temp",
+    page: 0,
   };
+  if (!cityNames.includes(state.from)) state.from = "서울";
+  if (!cityNames.includes(state.to)) state.to = state.from;
+  if (new Date().getHours() > state.end && state.end > state.start) state.dateIdx = 1;
+
   const dates = dateOptions();
-  const cache = {}; // 도시별 응답 저장 (같은 도시는 다시 안 불러옴)
+  const cache = {};
+  let last = null; // 마지막 계산 결과 (탭 바꿀 때 다시 씀)
 
-  // 입력 칸 채우기
-  const citySel = $("city");
-  let group = null, og = null;
-  for (const [region, name] of CITIES) {
-    if (region !== group) { og = document.createElement("optgroup"); og.label = region; citySel.appendChild(og); group = region; }
-    const o = document.createElement("option"); o.value = name; o.textContent = name; og.appendChild(o);
+  // ── 입력 칸 채우기
+  for (const sel of [$("from"), $("to")]) {
+    let group = null, og = null;
+    for (const [region, name] of CITIES) {
+      if (region !== group) { og = document.createElement("optgroup"); og.label = region; sel.appendChild(og); group = region; }
+      const o = document.createElement("option"); o.value = name; o.textContent = name; og.appendChild(o);
+    }
   }
-  if (!CITIES.some((c) => c[1] === state.city)) state.city = "서울";
-  citySel.value = state.city;
-
+  $("from").value = state.from;
+  $("to").value = state.to;
   for (const sel of [$("start"), $("end")]) {
     for (let h = 0; h < 24; h++) {
       const o = document.createElement("option"); o.value = h; o.textContent = `${pad(h)}:00`; sel.appendChild(o);
@@ -333,24 +374,31 @@ if (typeof document !== "undefined") {
   const dateTabs = $("dateTabs");
   dates.forEach((d, i) => {
     const b = document.createElement("button");
-    b.textContent = d.label; b.type = "button";
-    b.onclick = () => { state.dateIdx = i; render(); };
+    b.type = "button"; b.textContent = d.label;
+    b.onclick = () => { state.dateIdx = i; paintTabs(); };
     dateTabs.appendChild(b);
   });
+  function paintTabs() {
+    [...dateTabs.children].forEach((b, i) => b.classList.toggle("on", i === state.dateIdx));
+  }
+  paintTabs();
 
-  citySel.onchange = () => { state.city = citySel.value; store.set("city", state.city); update(); };
-  $("start").onchange = (e) => { state.start = +e.target.value; store.set("start", state.start); render(); };
-  $("end").onchange = (e) => { state.end = +e.target.value; store.set("end", state.end); render(); };
-  document.querySelectorAll("#dotTabs button").forEach((b) => {
-    b.onclick = () => { state.dotTab = b.dataset.k; render(); };
-  });
+  $("from").onchange = (e) => { state.from = e.target.value; store.set("from", state.from); };
+  $("to").onchange = (e) => { state.to = e.target.value; store.set("to", state.to); };
+  $("swap").onclick = () => {
+    [state.from, state.to] = [state.to, state.from];
+    $("from").value = state.from; $("to").value = state.to;
+    store.set("from", state.from); store.set("to", state.to);
+  };
+  $("start").onchange = (e) => { state.start = +e.target.value; store.set("start", state.start); };
+  $("end").onchange = (e) => { state.end = +e.target.value; store.set("end", state.end); };
 
+  // ── 데이터 불러오기
   async function getJSON(url) {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`서버 응답 ${res.status}`);
     return res.json();
   }
-
   async function load(cityName) {
     if (cache[cityName]) return cache[cityName];
     const [, , lat, lon] = CITIES.find((c) => c[1] === cityName);
@@ -360,12 +408,10 @@ if (typeof document !== "undefined") {
       models: "ecmwf_ifs025,gfs025",
       timezone: "Asia/Seoul", forecast_days: 7, past_days: 1, wind_speed_unit: "ms",
     });
-    const aq = new URLSearchParams({
-      latitude: lat, longitude: lon, hourly: "pm10,pm2_5", timezone: "Asia/Seoul", forecast_days: 5,
-    });
+    const aq = new URLSearchParams({ latitude: lat, longitude: lon, hourly: "pm10,pm2_5", timezone: "Asia/Seoul", forecast_days: 5 });
     const [ens, air] = await Promise.all([
       getJSON(`${ENSEMBLE_URL}?${q}`),
-      getJSON(`${AIR_URL}?${aq}`).catch(() => null), // 미세먼지는 실패해도 나머지는 보여줌
+      getJSON(`${AIR_URL}?${aq}`).catch(() => null),
     ]);
     const data = { ens, air, members: parseMembers(ens.hourly), at: new Date() };
     if (data.members.length === 0) throw new Error("예보 시나리오를 읽지 못했어요");
@@ -373,57 +419,80 @@ if (typeof document !== "undefined") {
     return data;
   }
 
-  function setStatus(html) { $("status").innerHTML = html; }
-
-  async function update() {
-    setStatus("82개 시나리오를 불러오는 중…");
-    $("result").hidden = true;
-    try {
-      await load(state.city);
-      setStatus("");
-      render();
-    } catch (e) {
-      setStatus(`<span class="err">예보를 불러오지 못했어요 (${e.message}).</span><button id="retry">다시 시도</button>`);
-      $("retry").onclick = update;
-    }
-  }
-
-  function airFor(data, idx) {
-    if (!data.air || !data.air.hourly) return null;
-    const t = data.ens.hourly.time;
-    const times = new Set(idx.map((i) => t[i]));
+  function airWorst(list) {
+    // list: [{data, times:Set}] → 구간마다 그 도시 미세먼지 중 가장 나쁜 값
     let pm10 = -1, pm25 = -1;
-    data.air.hourly.time.forEach((tt, i) => {
-      if (!times.has(tt)) return;
-      if (isNum(data.air.hourly.pm10[i])) pm10 = Math.max(pm10, data.air.hourly.pm10[i]);
-      if (isNum(data.air.hourly.pm2_5[i])) pm25 = Math.max(pm25, data.air.hourly.pm2_5[i]);
-    });
+    for (const { data, times } of list) {
+      if (!data.air || !data.air.hourly) continue;
+      data.air.hourly.time.forEach((tt, i) => {
+        if (!times.has(tt)) return;
+        if (isNum(data.air.hourly.pm10[i])) pm10 = Math.max(pm10, data.air.hourly.pm10[i]);
+        if (isNum(data.air.hourly.pm2_5[i])) pm25 = Math.max(pm25, data.air.hourly.pm2_5[i]);
+      });
+    }
     if (pm10 < 0 && pm25 < 0) return null;
     pm10 = Math.max(pm10, 0); pm25 = Math.max(pm25, 0);
     return { pm10, pm25, grade: airGrade(pm10, pm25) };
   }
 
-  function render() {
-    [...dateTabs.children].forEach((b, i) => b.classList.toggle("on", i === state.dateIdx));
-    document.querySelectorAll("#dotTabs button").forEach((b) => b.classList.toggle("on", b.dataset.k === state.dotTab));
-
-    const data = cache[state.city];
-    if (!data) return;
-    const date = dates[state.dateIdx].date;
-    const { idx, from, to } = windowIndices(data.ens.hourly.time, date, state.start, state.end);
-    const r = idx.length ? judge(data.members, idx) : null;
-    if (!r) {
-      $("result").hidden = true;
-      setStatus("이 시간대는 예보 범위 밖이에요. 다른 날짜나 시간을 골라 주세요.");
-      return;
+  // ── 확인하기
+  $("go").onclick = async () => {
+    const btn = $("go");
+    btn.disabled = true;
+    $("status").textContent = "82개 시나리오를 불러오는 중…";
+    try {
+      const [o, d] = await Promise.all([load(state.from), load(state.to)]);
+      const ok = compute(o, d);
+      if (!ok) { $("status").textContent = "이 시간대는 예보 범위 밖이에요. 다른 날짜나 시간을 골라 주세요."; return; }
+      $("status").textContent = "";
+      showResult();
+    } catch (e) {
+      $("status").innerHTML = `<span class="err">예보를 불러오지 못했어요 (${e.message}). 잠시 뒤 다시 눌러 주세요.</span>`;
+    } finally {
+      btn.disabled = false;
     }
-    setStatus("");
-    $("result").hidden = false;
+  };
 
-    const items = buildItems(r, airFor(data, idx));
+  function compute(o, d) {
+    const times = o.ens.hourly.time;
+    const date = dates[state.dateIdx].date;
+    const { idx, from, to } = windowIndices(times, date, state.start, state.end);
+    if (!idx.length) return false;
+    const sameCity = state.from === state.to;
+    const members = routeMembers(o.members, sameCity ? null : d.members, idx);
+    const r = judge(members, idx);
+    if (!r) return false;
+
+    // 구간 나누기: 출발(출발지) / 머무는 동안(도착지) / 집 도착(출발지)
+    const mid = idx.slice(1, -1);
+    const segs = [];
+    segs.push({ t: from.slice(11), place: state.from, label: "출발", idx: [idx[0]] });
+    if (mid.length) segs.push({ t: `${times[mid[0]].slice(11, 13)}~${times[mid[mid.length - 1]].slice(11, 13)}시`, place: state.to, label: sameCity ? "외출 중" : "도착지", idx: mid });
+    if (idx.length > 1) segs.push({ t: to.slice(11), place: state.from, label: "집 도착", idx: [idx[idx.length - 1]] });
+    segs.forEach((s) => { s.sum = segmentSummary(members, s.idx); });
+
+    const air = airWorst([
+      { data: o, times: new Set([idx[0], idx[idx.length - 1]].map((i) => times[i])) },
+      { data: sameCity ? o : d, times: new Set((mid.length ? mid : idx).map((i) => times[i])) },
+    ]);
+    last = { r, segs, air, from, to, sameCity, at: o.at };
+    return true;
+  }
+
+  // ── 결과 화면 그리기
+  function showResult() {
+    const { r, segs, air, from, to, sameCity, at } = last;
+    const items = buildItems(r, air);
+    const dl = dates[state.dateIdx].label;
+    const nextDay = to.slice(0, 10) !== from.slice(0, 10) ? " (다음 날)" : "";
+    $("summary").textContent = `${sameCity ? state.from : `${state.from} → ${state.to}`} · ${dl} ${from.slice(11)}~${to.slice(11)}${nextDay}`;
+    $("headLabel").textContent = `${dl}의 결론`;
     $("headline").textContent = buildHeadline(r, items);
-    $("headLabel").textContent = `${dates[state.dateIdx].label}의 결론`;
-    $("window").textContent = `${state.city} · ${dates[state.dateIdx].label} ${from.slice(11)} → ${to.slice(11)}${to.slice(0, 10) !== from.slice(0, 10) ? " (다음 날)" : ""}`;
+
+    $("route").innerHTML = segs.map((s) => `
+      <li><span class="t">${s.t}</span>
+        <span><b>${s.label}</b> <span class="p">${s.place}</span></span>
+        <span class="w">${s.sum ? `체감 ${Math.round(s.sum.feels)}°C${s.sum.wet >= 0.1 ? ` · ☔ ${Math.round(s.sum.wet * 100)}%` : ""}` : "-"}</span></li>`).join("");
 
     $("items").innerHTML = items.map((it) => `
       <li class="${it.on ? "" : "off"}">
@@ -436,23 +505,31 @@ if (typeof document !== "undefined") {
     $("tip").hidden = !tip;
     $("tip").textContent = tip || "";
 
-    // 시간대별 확률 vs 외출 전체 확률
     const cmp = $("compare");
     if (r.wet >= 0.1) {
-      cmp.hidden = false;
+      cmp.className = "panel compare";
       cmp.innerHTML = `
         <div><span class="n">${Math.round(r.hourlyMax * 100)}%</span><p>시간대별로 본<br>가장 높은 비·눈 확률</p></div>
         <div class="hl"><span class="n">${Math.round(r.wet * 100)}%</span><p>외출하는 동안 한 번이라도<br>비·눈을 만날 확률</p></div>
         <p class="note">일반 예보는 시간마다 따로 확률을 보여줘요. 챙길까?는 외출 시간 전체를 한 번에 봐요.</p>`;
     } else {
-      cmp.hidden = true;
+      cmp.className = "panel";
+      cmp.innerHTML = `<p class="sub">이번 외출은 82개 중 ${Math.round(r.wet * r.n)}개만 비·눈을 만나요. 비 오는 날엔 여기서 "시간대별 확률"과 "외출 전체 확률"이 얼마나 다른지 보여드려요.</p>`;
     }
 
-    renderDots(r);
-    $("updated").textContent = `예보 불러온 시각: ${data.at.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`;
+    renderDots();
+    $("updated").textContent = `예보 불러온 시각 ${at.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`;
+
+    $("screenInput").hidden = true;
+    $("screenResult").hidden = false;
+    window.scrollTo(0, 0);
+    goPage(0, false);
   }
 
-  function renderDots(r) {
+  function renderDots() {
+    if (!last) return;
+    const r = last.r;
+    document.querySelectorAll("#dotTabs button").forEach((b) => b.classList.toggle("on", b.dataset.k === state.dotTab));
     const box = $("dots"), cap = $("dotsCaption");
     if (state.dotTab === "rain" || state.dotTab === "snow") {
       const k = state.dotTab;
@@ -461,7 +538,6 @@ if (typeof document !== "undefined") {
       cap.textContent = `${r.n}번 중 ${on}번, 외출하는 동안 ${k === "rain" ? "비" : "눈"}가 왔어요.`;
       return;
     }
-    // 기온: 시나리오를 추운 순서로 놓고, 외출 중 최저 체감온도로 색칠 (색은 온도에 고정 → 색이 고르면 확실)
     const sorted = [...r.per].sort((a, b) => a.minFeels - b.minFeels);
     const lo = Math.round(sorted[0].minFeels), hi = Math.round(sorted[sorted.length - 1].minFeels);
     const used = [...new Set(sorted.map((p) => coatLevel(p.minFeels)))].sort((a, b) => a - b);
@@ -476,8 +552,47 @@ if (typeof document !== "undefined") {
         : `${lo}~${hi}°C로 넓게 퍼져 있어서 예보가 흔들리는 날이에요.`;
     cap.textContent = `점 하나가 시나리오 하나예요. 외출 중 가장 추울 때 체감온도가 ${spreadMsg}`;
   }
+  document.querySelectorAll("#dotTabs button").forEach((b) => {
+    b.onclick = () => { state.dotTab = b.dataset.k; renderDots(); };
+  });
 
-  // 오늘 시간이 이미 지났으면 내일을 기본으로
-  if (new Date().getHours() > state.end && state.end > state.start) state.dateIdx = 1;
-  update();
+  // ── 페이지 넘기기 (손가락으로 밀거나 버튼으로)
+  const pager = $("pager");
+  const pages = [...pager.children];
+  const pdots = $("pdots");
+  pages.forEach((_, i) => {
+    const s = document.createElement("span");
+    s.onclick = () => goPage(i);
+    pdots.appendChild(s);
+  });
+  function paintNav() {
+    [...pdots.children].forEach((s, i) => s.classList.toggle("on", i === state.page));
+    $("prev").disabled = state.page === 0;
+    $("next").disabled = state.page === pages.length - 1;
+    // 현재 페이지 높이에 맞추기 (긴 페이지 때문에 짧은 페이지 아래가 비지 않게)
+    pager.style.height = pages[state.page].scrollHeight + "px";
+  }
+  function goPage(i, smooth = true) {
+    state.page = Math.max(0, Math.min(pages.length - 1, i));
+    pager.scrollTo({ left: pages[state.page].offsetLeft - pager.offsetLeft, behavior: smooth ? "smooth" : "auto" });
+    paintNav();
+    if (smooth) window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  let scrollTimer = null;
+  pager.addEventListener("scroll", () => {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      const i = Math.round(pager.scrollLeft / (pager.clientWidth + 16));
+      if (i !== state.page) { state.page = i; paintNav(); }
+    }, 80);
+  });
+  $("prev").onclick = () => goPage(state.page - 1);
+  $("next").onclick = () => goPage(state.page + 1);
+  window.addEventListener("resize", () => { if (last) paintNav(); });
+
+  $("back").onclick = () => {
+    $("screenResult").hidden = true;
+    $("screenInput").hidden = false;
+    window.scrollTo(0, 0);
+  };
 }
