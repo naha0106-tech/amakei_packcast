@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>챙길까? · 외출 날씨 준비물</title>
+  <meta name="description" content="강수확률 60%, 그래서 우산 챙겨요 말아요? 82번 시뮬레이션으로 대신 판단해 드려요." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎒</text></svg>" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="top">
+      <h1>챙길까?</h1>
+      <p class="tagline">외출하는 동안의 날씨를 <b>82번 시뮬레이션</b>해서<br />챙길 것을 대신 정해 드려요.</p>
+    </header>
+
+    <section class="panel inputs" aria-label="외출 정보 입력">
+      <label class="field">
+        <span>도시</span>
+        <select id="city"></select>
+      </label>
+
+      <div class="field">
+        <span>날짜</span>
+        <div class="tabs" id="dateTabs" role="tablist"></div>
+      </div>
+
+      <div class="row">
+        <label class="field">
+          <span>출발</span>
+          <select id="start"></select>
+        </label>
+        <span class="arrow">→</span>
+        <label class="field">
+          <span>귀가</span>
+          <select id="end"></select>
+        </label>
+      </div>
+    </section>
+
+    <section id="status" class="status" aria-live="polite"></section>
+
+    <section id="result" class="result" hidden>
+      <div class="panel headline">
+        <p class="label" id="headLabel">오늘의 결론</p>
+        <p id="headline" class="big"></p>
+        <p id="window" class="sub"></p>
+      </div>
+
+      <div class="panel">
+        <h2>챙길 것</h2>
+        <ul id="items" class="items"></ul>
+        <div id="tip" class="tip" hidden></div>
+      </div>
+
+      <div id="compare" class="panel compare" hidden></div>
+
+      <div class="panel">
+        <div class="dots-head">
+          <h2>82번의 시뮬레이션</h2>
+          <div class="tabs small" id="dotTabs" role="tablist">
+            <button data-k="temp" class="on">기온</button>
+            <button data-k="snow">눈</button>
+            <button data-k="rain">비</button>
+          </div>
+        </div>
+        <div id="dots"></div>
+        <p id="dotsCaption" class="sub"></p>
+      </div>
+
+      <details class="panel how">
+        <summary>어떻게 판단하나요?</summary>
+        <p>일반 날씨 예보는 하나의 예상만 보여줘요. 하지만 날씨 기관들은 조건을 조금씩 바꿔 가며 예보를 수십 번 계산해요. 이것을 <b>앙상블 예보</b>라고 해요.</p>
+        <p>챙길까?는 유럽(ECMWF) 51개와 미국(GFS) 31개, 모두 <b>82개의 예보 시나리오</b>를 가져와서, 내가 밖에 있는 시간 동안 각 시나리오에서 무슨 일이 일어나는지 직접 세어 봐요.</p>
+        <ul>
+          <li><b>확실</b>: 82개 중 85% 이상이 같은 결과</li>
+          <li><b>아마도</b>: 65~84%가 같은 결과</li>
+          <li><b>애매함</b>: 의견이 갈림 → 대비하고, 출발 전에 다시 확인하세요</li>
+        </ul>
+        <p>그래서 "시간대별 강수확률"이 아니라 <b>"외출하는 동안 한 번이라도 비·눈을 만날 확률"</b>을 알려드릴 수 있어요.</p>
+        <p class="sub">옷 기준(체감온도): 4°C 이하 패딩 · 5~8 코트 · 9~11 트렌치코트 · 12~16 자켓 · 17~19 맨투맨 · 20~22 얇은 가디건 · 23~27 얇은 셔츠 · 28 이상 반팔</p>
+      </details>
+    </section>
+
+    <footer class="foot">
+      <p>날씨 데이터: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a> (ECMWF·NOAA 앙상블 예보, 대기질 예보) · 실제 예보 데이터를 사용해요.</p>
+      <p>개인정보를 수집하지 않아요. 선택한 도시와 시간은 이 브라우저에만 저장돼요.</p>
+      <p id="updated"></p>
+    </footer>
+  </main>
+
+  <script src="cities.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
